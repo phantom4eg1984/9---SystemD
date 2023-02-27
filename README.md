@@ -122,3 +122,90 @@ Feb 27 00:34:18 phantom4eg systemd[1]: Started Run watchlog script every 30 seco
 
 Мы можем увидеть, что служба периодически запускается и проверяет лог-файл на предмет наличия ключевого слова ```ALERT```.
 
+## 2. Из epel установить spawn-fcgi и переписать init-скрипт на unit-файл. Имя сервиса должно также называться.
+
+Справка:
+```
+spawn-fcgi - это утилита, которая позволяет запускать FastCGI-приложения, такие как PHP, Ruby on Rails и другие, в качестве отдельных процессов. 
+Она позволяет запускать приложения в фоновом режиме, под контролем системы и с автоматическим перезапуском в случае падения или завершения процесса. 
+Это удобно для обеспечения отказоустойчивости и устранения сбоев в работе веб-приложений.
+```
+
+```/etc/rc.d/init.d/spawn-fcgi``` - init скрипт который требяется переписать.
+
+Для этого необходимо раскомментировать строки с переменными в файле ```/etc/sysconfig/spawn-fcgi```
+```
+SOCKET=/var/run/php-fcgi.sock
+OPTIONS="-u apache -g apache -s $SOCKET -S -M 0600 -C 32 -F 1 -P /var/run/spawn-fcgi.pid -- /usr/bin/php-cgi"
+```
+
+Создадим unit-файл с именем ```/etc/systemd/system/spawn-fcgi.service```:
+```
+[Unit]
+Description=Spawn-fcgi startup service
+After=network.target
+
+[Service]
+Type=simple
+PIDFile=/var/run/spawn-fcgi.pid
+EnvironmentFile=/etc/sysconfig/spawn-fcgi
+ExecStart=/usr/bin/spawn-fcgi -n $OPTIONS
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Запускаем сервис и добавляем его в автозагрузку:
+```
+systemctl start spawn-fcgi.service 
+systemctl enable spawn-fcgi.service 
+```
+
+Проверяем статус нашего сервиса:
+```
+[root@phantom4eg ~]# systemctl status spawn-fcgi.service 
+● spawn-fcgi.service - Spawn-fcgi startup service
+   Loaded: loaded (/etc/systemd/system/spawn-fcgi.service; enabled; vendor preset: disabled)
+   Active: active (running) since Mon 2023-02-27 09:13:39 UTC; 1min 11s ago
+```
+
+## 3. Дополнить Unit-файл apache httpd возможностью запустить несколько инстансов сервера с разными конфигами:
+
+Для начала требуется отредактировать шаблон в конфигурации файла окружения ```/usr/lib/systemd/system/httpd.service```. Добавим в секцию [Service] следующую строчку:
+```
+EnvironmentFile=/etc/sysconfig/httpd-%I
+```
+
+В файлах окружения ```/etc/sysconfig/httpd-first``` и ```/etc/sysconfig/httpd-second``` задаем параметры для запуска веб-сервера с необходимым для нас конфигурационным файлом:
+```
+/etc/sysconfig/httpd-first:
+OPTIONS=-f conf/first.conf
+/etc/sysconfig/httpd-second:
+OPTIONS=-f conf/second.conf
+```
+
+В каталоге ```/etc/httpd/conf``` создадим два конфига, за основу возьмем конфигурационный файл ```httpd.conf```, скопируем его 2 раза:
+```
+cp httpd.conf first.conf
+cp httpd.conf second.conf
+```
+
+Конфигурационный файл ```first.conf``` оставим без изменений, в конфиге ```second.conf``` добавим 2 опции:
+```
+PidFile /var/run/httpd-second.pid
+Listen 8080
+```
+
+Запустим инстансы:
+```
+systemctl start httpd@first
+systemctl start httpd@second
+```
+
+Проверим что оба порта прослушиваются:
+```
+[root@phantom4eg conf]# ss -tnlup | grep httpd
+tcp   LISTEN 0      128                *:8080            *:*    users:(("httpd",pid=3577,fd=4),("httpd",pid=3576,fd=4),("httpd",pid=3575,fd=4),("httpd",pid=3572,fd=4))
+tcp   LISTEN 0      128                *:80              *:*    users:(("httpd",pid=3355,fd=4),("httpd",pid=3354,fd=4),("httpd",pid=3353,fd=4),("httpd",pid=3350,fd=4))
+```
